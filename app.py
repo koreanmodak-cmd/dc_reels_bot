@@ -8,11 +8,11 @@ warnings.filterwarnings("ignore")
 import google.generativeai as genai
 
 # ==========================================
-# 1. 설정 (보안 환경변수 및 모델)
+# 1. 설정
 # ==========================================
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or "본인의_GEMINI_API_KEY"
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN") or "본인의_TELEGRAM_TOKEN"
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID") or "본인의_TELEGRAM_CHAT_ID"
 
 genai.configure(api_key=GEMINI_API_KEY)
 AVAILABLE_MODEL = 'gemini-3.8-flash'
@@ -24,39 +24,57 @@ HEADERS = {
 }
 
 # ==========================================
-# 텔레그램 메세지 전송 함수
+# 텔레그램 메세지 전송 함수 (상세 에러 출력 적용)
 # ==========================================
 def send_telegram_message(text):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID or TELEGRAM_TOKEN.startswith("본인의"):
         print("⚠️ 텔레그램 토큰 또는 Chat ID가 설정되지 않았습니다.")
-        return
+        return False
         
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    
+    # 1차 시도: 마크다운 스타일 적용
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
         "parse_mode": "Markdown"
     }
+    
     try:
-        res = requests.post(url, json=payload)
-        if res.status_code != 200:
-            # 마크다운 파싱 에러 시 일반 텍스트로 재시도
-            payload.pop("parse_mode")
-            requests.post(url, json=payload)
+        res = requests.post(url, json=payload, timeout=10)
+        
+        # 성공 시
+        if res.status_code == 200:
+            print("📡 [텔레그램] 전송 성공!")
+            return True
+            
+        # 마크다운 문법 오류 시 일반 텍스트로 2차 시도
+        print(f"⚠️ 마크다운 전송 실패 ({res.status_code}). 일반 텍스트로 재시도합니다...")
+        payload.pop("parse_mode")
+        res_retry = requests.post(url, json=payload, timeout=10)
+        
+        if res_retry.status_code == 200:
+            print("📡 [텔레그램] 일반 텍스트 전송 성공!")
+            return True
+        else:
+            print(f"❌ [텔레그램] 최종 전송 실패! 응답 코드: {res_retry.status_code}")
+            print(f"📄 서버 응답 내용: {res_retry.text}")
+            return False
+            
     except Exception as e:
-        print(f"⚠️ 텔레그램 전송 실패: {e}")
+        print(f"💥 [텔레그램] 통신 중 예외 발생: {e}")
+        return False
 
 # ==========================================
-# 2. 크롤링 함수 (오늘자 상위 4개 수집)
+# 2. 크롤링 함수
 # ==========================================
 def get_top_posts():
-    print("🔄 디시인사이드 실시간 베스트 '오늘자' 데이터 수집 중...")
+    print("🔄 디시인사이드 실시간 베스트 데이터 수집 중...")
     all_posts = []
     page = 1
     max_pages = 5
-    keep_going = True
     
-    while keep_going and page <= max_pages:
+    while page <= max_pages:
         pc_url = f"https://gall.dcinside.com/board/lists/?id=dcbest&page={page}"
         try:
             res = requests.get(pc_url, headers=HEADERS, timeout=10)
@@ -68,11 +86,6 @@ def get_top_posts():
             for row in rows:
                 num_td = row.select_one('td.gall_num')
                 if num_td and num_td.text.strip() in ['설문', '공지', '뉴스']:
-                    continue
-                
-                date_td = row.select_one('td.gall_date')
-                if not date_td or ':' not in date_td.text.strip():
-                    keep_going = False
                     continue
                 
                 title_a = row.select_one('td.gall_tit a')
@@ -154,10 +167,12 @@ if __name__ == "__main__":
     top_posts = get_top_posts()
     
     if not top_posts:
-        send_telegram_message("⚠️ 오늘자 디시인사이드 인기글을 찾지 못했습니다.")
+        send_telegram_message("⚠️ 디시인사이드 인기글 수집 실패")
         exit()
         
-    start_msg = f"🔥 *[오늘자 최정예 릴스 대본 4개 도착]*\n총 {len(top_posts)}개의 대본 생성을 시작합니다.\n"
+    print(f"📌 총 {len(top_posts)}개 글 수집 성공. 텔레그램 전송 시작...\n")
+    
+    start_msg = f"🔥 *[오늘자 최정예 릴스 대본 4개 도착]*\n총 {len(top_posts)}개의 대본 전송을 시작합니다."
     send_telegram_message(start_msg)
     
     for index, post in enumerate(top_posts):
@@ -170,16 +185,16 @@ if __name__ == "__main__":
         script = generate_reels_script(post['title'], content, post_type)
         
         telegram_text = (
-            f"🎬 *[{index+1}/4] {post_type}*\n"
-            f"*제목:* {post['title']}\n"
+            f"🎬 [{index+1}/4] {post_type}\n"
+            f"제목: {post['title']}\n"
             f"📊 (조회수: {post['views']} | 댓글: {post['replies']})\n"
-            f"🔗 [원문보기]({post['link']})\n\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🔗 원문: {post['link']}\n\n"
+            f"----------------------------------\n"
             f"{script}\n"
-            f"━━━━━━━━━━━━━━━━━━"
+            f"----------------------------------"
         )
+        print(f"[{index+1}/4] {post['title']} 전송 시도 중...")
         send_telegram_message(telegram_text)
-        print(telegram_text)
         time.sleep(2)
         
-    print("✅ 텔레그램 전송 완료!")
+    print("\n✅ 모든 작업 완료!")
