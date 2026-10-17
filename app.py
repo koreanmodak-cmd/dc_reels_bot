@@ -179,6 +179,7 @@ if __name__ == "__main__":
             f"━━━━━━━━━━━━━━━━━━"
         )
         send_telegram_message(telegram_text)
+        print(telegram_text)
         time.sleep(2)
         
     print("✅ 텔레그램 전송 완료!")
