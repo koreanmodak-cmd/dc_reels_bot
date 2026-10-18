@@ -24,57 +24,66 @@ HEADERS = {
 }
 
 # ==========================================
-# 텔레그램 메세지 전송 함수 (상세 에러 출력 적용)
+# [요구사항 5] 텔레그램 /on, /off 상태 확인
 # ==========================================
-def send_telegram_message(text):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID or TELEGRAM_TOKEN.startswith("본인의"):
-        print("⚠️ 텔레그램 토큰 또는 Chat ID가 설정되지 않았습니다.")
+def check_bot_status():
+    if not TELEGRAM_TOKEN or TELEGRAM_TOKEN.startswith("본인"):
+        return True
+        
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+        res = requests.get(url, timeout=10).json()
+        
+        if res.get("ok") and res.get("result"):
+            # 가장 최근에 보낸 명령어부터 거꾸로 확인
+            for update in reversed(res["result"]):
+                msg = update.get("message", {})
+                if str(msg.get("chat", {}).get("id")) == str(TELEGRAM_CHAT_ID):
+                    text = msg.get("text", "").strip().lower()
+                    if text == "/off":
+                        print("⏸️ [상태] 사용자가 /off를 입력했습니다. 오늘 자동화를 건너뜁니다.")
+                        return False
+                    elif text == "/on":
+                        print("▶️ [상태] 사용자가 /on을 입력했습니다. 자동화를 시작합니다.")
+                        return True
+    except Exception as e:
+        print(f"상태 확인 중 에러: {e}")
+        
+    return True # 기본값은 무조건 ON
+
+# ==========================================
+# 텔레그램 메세지 전송 함수
+# ==========================================
+def send_telegram_message(text, use_markdown=True):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return False
         
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
     
-    # 1차 시도: 마크다운 스타일 적용
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "Markdown"
-    }
-    
+    if use_markdown:
+        payload["parse_mode"] = "Markdown"
+        
     try:
         res = requests.post(url, json=payload, timeout=10)
-        
-        # 성공 시
-        if res.status_code == 200:
-            print("📡 [텔레그램] 전송 성공!")
-            return True
-            
-        # 마크다운 문법 오류 시 일반 텍스트로 2차 시도
-        print(f"⚠️ 마크다운 전송 실패 ({res.status_code}). 일반 텍스트로 재시도합니다...")
-        payload.pop("parse_mode")
-        res_retry = requests.post(url, json=payload, timeout=10)
-        
-        if res_retry.status_code == 200:
-            print("📡 [텔레그램] 일반 텍스트 전송 성공!")
-            return True
-        else:
-            print(f"❌ [텔레그램] 최종 전송 실패! 응답 코드: {res_retry.status_code}")
-            print(f"📄 서버 응답 내용: {res_retry.text}")
-            return False
-            
-    except Exception as e:
-        print(f"💥 [텔레그램] 통신 중 예외 발생: {e}")
-        return False
+        # 마크다운 에러 시 텍스트로 재시도
+        if res.status_code != 200 and use_markdown:
+            payload.pop("parse_mode")
+            requests.post(url, json=payload, timeout=10)
+    except Exception:
+        pass
 
 # ==========================================
-# 2. 크롤링 함수
+# 2. 크롤링 함수 ([요구사항 1] 오늘 날짜만 엄격하게 수집)
 # ==========================================
 def get_top_posts():
-    print("🔄 디시인사이드 실시간 베스트 데이터 수집 중...")
+    print("🔄 디시인사이드 실시간 베스트 '오늘자' 데이터 수집 중...")
     all_posts = []
     page = 1
     max_pages = 5
+    keep_going = True
     
-    while page <= max_pages:
+    while keep_going and page <= max_pages:
         pc_url = f"https://gall.dcinside.com/board/lists/?id=dcbest&page={page}"
         try:
             res = requests.get(pc_url, headers=HEADERS, timeout=10)
@@ -88,6 +97,12 @@ def get_top_posts():
                 if num_td and num_td.text.strip() in ['설문', '공지', '뉴스']:
                     continue
                 
+                # 날짜에 ':'(시간)이 없으면 어제 글이므로 즉시 크롤링 전체 중단
+                date_td = row.select_one('td.gall_date')
+                if not date_td or ':' not in date_td.text.strip():
+                    keep_going = False
+                    continue
+                
                 title_a = row.select_one('td.gall_tit a')
                 if not title_a or 'reply_numbox' in title_a.get('class', []):
                     continue
@@ -98,10 +113,8 @@ def get_top_posts():
                     continue
                 
                 link = "https://gall.dcinside.com" + href if href.startswith('/') else href
-                
                 reply_a = row.select_one('a.reply_numbox')
                 reply_count = int(reply_a.text.strip().replace('[', '').replace(']', '')) if reply_a and reply_a.text.strip().replace('[', '').replace(']', '').isdigit() else 0
-                
                 views_td = row.select_one('td.gall_count')
                 views_count = int(views_td.text.strip().replace(',', '')) if views_td and views_td.text.strip().replace(',', '').isdigit() else 0
                 
@@ -121,7 +134,6 @@ def get_top_posts():
 
     sorted_by_views = sorted(all_posts, key=lambda x: x['views'], reverse=True)
     top_views = sorted_by_views[:2]
-    
     sorted_by_replies = sorted(all_posts, key=lambda x: x['replies'], reverse=True)
     top_replies = [p for p in sorted_by_replies if p not in top_views][:2]
             
@@ -138,21 +150,28 @@ def get_post_content(url):
         pass
     return ""
 
+# ==========================================
+# 3. AI 대본 생성 ([요구사항 3, 4] 프롬프트 최적화 & 페르소나 부여)
+# ==========================================
 def generate_reels_script(title, content, post_type=""):
-    focus_point = "엄청난 조회수를 기록한 핫이슈입니다. 충격적이고 흥미롭게 쓰세요." if "조회수" in post_type else "논란과 토론이 뜨거운 글입니다. 시청자의 댓글 작성을 유도하세요."
     prompt = f"""
-    당신은 인스타그램 릴스 조회수를 폭발시키는 전문 대본 작가입니다.
-    아래 게시글을 바탕으로 60초 이내 릴스 대본을 작성해주세요.
+    당신은 도파민 중독자들을 홀리는 100만 유튜버이자 쇼츠/릴스 전문 대본 작가입니다.
+    아래 커뮤니티 글을 바탕으로 Vrew 같은 영상 제작 AI에 바로 붙여넣을 수 있는 [대본 세트]를 만드세요.
 
-    [제목]: {title}
-    [내용]: {content}
-    [포인트]: {focus_point}
+    [원문 제목]: {title}
+    [원문 내용]: {content}
 
-    [작성 규칙]:
-    1. 원문을 그대로 쓰지 말고 자극적이고 흥미로운 말투로 재창작하세요.
-    2. 닉네임이나 개인정보는 삭제하세요.
-    3. 첫 3초는 강렬한 후킹 문장으로 시작하세요.
-    4. [효과음] 지시어 없이 AI 성우가 읽을 텍스트만 작성하세요.
+    [대본 작성 절대 규칙]:
+    1. 말투: 친절함은 버리세요. 친한 동네 형/오빠가 어이없는 썰을 풀어주듯, 찰지고 트렌디하게 팩트폭행을 날리세요. (예: "야, 니들 이거 봤냐?", "와 이건 진짜 선넘었지;")
+    2. 엔딩: 지루하게 질문으로 끝내지 마세요. 시청자가 벙찌는 반전 결말, 혹은 강렬한 한 줄 평으로 킹받게 마무리하세요.
+    3. 구조: Vrew에 바로 붙여넣기 좋게, 상단에 '이미지 프롬프트'를 적고 하단에 '나레이션'만 순수하게 적어주세요.
+
+    [출력 양식] (반드시 이 양식을 지켜주세요. 복사해서 바로 쓸 겁니다)
+
+    [영상 프롬프트: 어두운 방, 충격받은 표정의 사람 등 영상 배경에 들어갈 키워드 1~2줄]
+
+    (여기서부터 나레이션 대본)
+    야 릴스 넘기지 마봐. 오늘 진짜 어이없는 거 보여줄게. ...
     """
     try:
         response = model.generate_content(prompt)
@@ -161,20 +180,30 @@ def generate_reels_script(title, content, post_type=""):
         return f"AI 생성 오류: {e}"
 
 # ==========================================
-# 3. 메인 실행
+# 4. 메인 실행 ([요구사항 2] 텔레그램 메시지 구조 단순화)
 # ==========================================
 if __name__ == "__main__":
+    # 상태 체크 로직 실행 (/off 시 즉시 종료)
+    if not check_bot_status():
+        send_telegram_message("⏸️ 봇이 오프 모드입니다. 오늘자 대본 생성을 건너뜁니다.")
+        exit()
+
     top_posts = get_top_posts()
     
     if not top_posts:
-        send_telegram_message("⚠️ 디시인사이드 인기글 수집 실패")
+        send_telegram_message("⚠️ 오늘자 디시인사이드 인기글을 찾지 못했습니다.")
         exit()
         
-    print(f"📌 총 {len(top_posts)}개 글 수집 성공. 텔레그램 전송 시작...\n")
+    # [1] 첫 번째 메시지: 오늘자 요약 정보만 전송
+    summary_msg = f"🔥 *[오늘자 최정예 릴스 요약]*\n\n"
+    for i, p in enumerate(top_posts):
+        summary_msg += f"{i+1}. [{p['title']}]({p['link']})\n(👀조회: {p['views']} | 💬댓글: {p['replies']})\n\n"
+    summary_msg += "👇 아래에서 원하는 대본을 꾹 눌러 복사하세요 👇"
     
-    start_msg = f"🔥 *[오늘자 최정예 릴스 대본 4개 도착]*\n총 {len(top_posts)}개의 대본 전송을 시작합니다."
-    send_telegram_message(start_msg)
+    send_telegram_message(summary_msg, use_markdown=True)
+    time.sleep(2)
     
+    # [2] 이어지는 네 메시지: 오직 '대본'만 1개씩 전송
     for index, post in enumerate(top_posts):
         post_type = "🔥 조회수 탑 랭커" if index < 2 else "💬 댓글 폭발 랭커"
         content = get_post_content(post['link'])
@@ -184,17 +213,8 @@ if __name__ == "__main__":
             
         script = generate_reels_script(post['title'], content, post_type)
         
-        telegram_text = (
-            f"🎬 [{index+1}/4] {post_type}\n"
-            f"제목: {post['title']}\n"
-            f"📊 (조회수: {post['views']} | 댓글: {post['replies']})\n"
-            f"🔗 원문: {post['link']}\n\n"
-            f"----------------------------------\n"
-            f"{script}\n"
-            f"----------------------------------"
-        )
-        print(f"[{index+1}/4] {post['title']} 전송 시도 중...")
-        send_telegram_message(telegram_text)
-        time.sleep(2)
+        # 제목이나 장식 없이 순수 생성된 대본만 전송 (복사하기 쉽도록 마크다운 미적용)
+        send_telegram_message(script, use_markdown=False)
+        time.sleep(3)
         
-    print("\n✅ 모든 작업 완료!")
+    print("\n✅ 오늘자 최정예 릴스 대본 4개 전송 완료!")
